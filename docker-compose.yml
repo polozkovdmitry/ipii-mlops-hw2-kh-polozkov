@@ -26,5 +26,10 @@ services:
       CLICKHOUSE_USER: default
       CLICKHOUSE_PASSWORD: ""
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse   # чтобы данные переживали docker compose down
     depends_on:
       - kafka
+
+volumes:
+  clickhouse_data:

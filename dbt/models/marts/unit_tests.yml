@@ -1,0 +1,87 @@
+unit_tests:
+  - name: test_merchant_wilson_flag_ignores_small_samples
+    description: >
+      Overall fraud rate here is 5/20 = 25%. "Small" has 1 fraud of 2 (50%, twice the average) but
+      only 2 transactions, so its Wilson lower bound (~9.5%) is below 25% and it is NOT suspicious.
+      "Big" has 4 of 5 (80%), lower bound ~37.6% > 25%, so it IS suspicious. "Clean" has no fraud.
+    model: mart_merchant_analytics
+    given:
+      - input: ref('stg_transactions')
+        format: csv
+        rows: |
+          merchant_name,category,customer_id,amount,is_fraud,transaction_at
+          Small,travel,c1,10,1,2019-01-01 10:00:00
+          Small,travel,c2,10,0,2019-01-02 10:00:00
+          Big,travel,c1,10,1,2019-01-01 10:00:00
+          Big,travel,c2,10,1,2019-01-02 10:00:00
+          Big,travel,c3,10,1,2019-01-03 10:00:00
+          Big,travel,c4,10,1,2019-01-04 10:00:00
+          Big,travel,c5,10,0,2019-01-05 10:00:00
+          Clean,home,c1,10,0,2019-01-01 10:00:00
+          Clean,home,c2,10,0,2019-01-02 10:00:00
+          Clean,home,c3,10,0,2019-01-03 10:00:00
+          Clean,home,c4,10,0,2019-01-04 10:00:00
+          Clean,home,c5,10,0,2019-01-05 10:00:00
+          Clean,home,c6,10,0,2019-01-06 10:00:00
+          Clean,home,c7,10,0,2019-01-07 10:00:00
+          Clean,home,c8,10,0,2019-01-08 10:00:00
+          Clean,home,c9,10,0,2019-01-09 10:00:00
+          Clean,home,c10,10,0,2019-01-10 10:00:00
+          Clean,home,c11,10,0,2019-01-11 10:00:00
+          Clean,home,c12,10,0,2019-01-12 10:00:00
+          Clean,home,c13,10,0,2019-01-13 10:00:00
+    expect:
+      rows:
+        - {merchant_name: "Small", txn_count: 2, fraud_count: 1, fraud_rate_pct: 50, overall_fraud_rate_pct: 25, is_suspicious: 0}
+        - {merchant_name: "Big", txn_count: 5, fraud_count: 4, fraud_rate_pct: 80, overall_fraud_rate_pct: 25, is_suspicious: 1}
+        - {merchant_name: "Clean", txn_count: 13, fraud_count: 0, fraud_rate_pct: 0, overall_fraud_rate_pct: 25, is_suspicious: 0}
+
+  - name: test_customer_risk_score_and_tiers
+    description: >
+      Three customers, so percentile ranks are 0 / 0.5 / 1. With risk_fraud_rate_cap = 1 the fraud
+      component equals the raw fraud rate. A: 1.0 on every component -> 100 HIGH.
+      B: 0.5 on every component -> 50 MEDIUM. C: 0 everywhere -> 0 LOW.
+    model: mart_customer_risk_profile
+    overrides:
+      vars:
+        risk_fraud_rate_cap: 1
+    given:
+      - input: ref('stg_transactions')
+        format: csv
+        rows: |
+          customer_id,amount,is_fraud,is_night,category,transaction_at
+          A,500,1,1,travel,2019-01-01 23:00:00
+          B,100,1,1,travel,2019-01-01 23:00:00
+          B,100,0,0,travel,2019-01-02 12:00:00
+          C,10,0,0,home,2019-01-01 12:00:00
+          C,10,0,0,home,2019-01-02 12:00:00
+    expect:
+      rows:
+        - {customer_id: "A", fraud_component: 1, amount_component: 1, night_component: 1, risk_score: 100, risk_tier: "HIGH"}
+        - {customer_id: "B", fraud_component: 0.5, amount_component: 0.5, night_component: 0.5, risk_score: 50, risk_tier: "MEDIUM"}
+        - {customer_id: "C", fraud_component: 0, amount_component: 0, night_component: 0, risk_score: 0, risk_tier: "LOW"}
+
+  - name: test_daily_state_metrics_incremental_lookback
+    description: >
+      In incremental mode only days within incremental_lookback_days (3) of the latest date already
+      in the table are recomputed: with max date 2020-03-10 the 2020-03-01 rows are skipped.
+    model: mart_daily_state_metrics
+    overrides:
+      macros:
+        is_incremental: true
+    given:
+      - input: this
+        rows:
+          - {transaction_date: "2020-03-10", state_code: "CA"}
+      - input: ref('stg_transactions')
+        format: csv
+        rows: |
+          transaction_date,state_code,amount,is_large_amount,is_fraud
+          2020-03-01,CA,50,0,0
+          2020-03-09,CA,100,0,0
+          2020-03-09,CA,300,1,1
+          2020-03-09,NY,20,0,0
+    expect:
+      rows:
+        - {transaction_date: "2020-03-09", state_code: "CA", txn_count: 2, total_amount: 400, avg_amount: 200, large_txn_count: 1, large_txn_share_pct: 50, fraud_count: 1, fraud_rate_pct: 50}
+        - {transaction_date: "2020-03-09", state_code: "NY", txn_count: 1, total_amount: 20, avg_amount: 20, large_txn_count: 0, large_txn_share_pct: 0, fraud_count: 0, fraud_rate_pct: 0}

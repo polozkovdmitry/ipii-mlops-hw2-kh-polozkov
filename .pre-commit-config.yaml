@@ -1,0 +1,25 @@
+# Хуки ставятся на весь репозиторий: make -C dbt precommit-install
+# sqlfluff с dbt-шаблонизатором компилирует проект, поэтому ClickHouse должен быть запущен.
+exclude: ^dbt/(target|dbt_packages|logs)/
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+
+  - repo: https://github.com/sqlfluff/sqlfluff
+    rev: 4.5.0
+    hooks:
+      - id: sqlfluff-lint
+        args: [--dialect, clickhouse]
+        files: ^dbt/(models|tests)/.*\.sql$
+        additional_dependencies: [dbt-core==1.12.6, dbt-clickhouse==1.10.3, sqlfluff-templater-dbt==4.5.0]
+      - id: sqlfluff-fix
+        args: [--dialect, clickhouse]
+        files: ^dbt/(models|tests)/.*\.sql$
+        additional_dependencies: [dbt-core==1.12.6, dbt-clickhouse==1.10.3, sqlfluff-templater-dbt==4.5.0]

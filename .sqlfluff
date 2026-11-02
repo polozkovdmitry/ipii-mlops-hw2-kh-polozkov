@@ -1,0 +1,45 @@
+# Конфиг лежит в корне репозитория, а не в dbt/: templater sqlfluff берёт только из
+# конфига в каталоге запуска, а pre-commit всегда запускается из корня.
+# Запускать тоже из корня: sqlfluff lint dbt/models dbt/tests (или make -C dbt lint).
+[sqlfluff]
+dialect = clickhouse
+templater = dbt
+max_line_length = 120
+# CP03: функции ClickHouse в camelCase (toDateTime, uniqExact), их регистр не трогаем
+# ST06: порядок колонок в select оставляем по смыслу, а не "простые колонки сначала"
+exclude_rules = CP03, ST06
+# Параметрические агрегатные функции ClickHouse (quantile(0.95)(x), topK(1)(x)) диалект
+# sqlfluff не понимает и просит пробел между скобками, на таких строках стоит -- noqa: LT01
+
+[sqlfluff:templater:dbt]
+project_dir = dbt
+profiles_dir = dbt
+
+[sqlfluff:templater:jinja]
+apply_dbt_builtins = True
+
+[sqlfluff:indentation]
+tab_space_size = 4
+indented_joins = False
+implicit_indents = allow
+
+[sqlfluff:rules:capitalisation.keywords]
+capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.identifiers]
+extended_capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.literals]
+capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.types]
+extended_capitalisation_policy = pascal
+
+[sqlfluff:rules:aliasing.table]
+aliasing = explicit
+
+[sqlfluff:rules:aliasing.column]
+aliasing = explicit
+
+[sqlfluff:rules:ambiguous.column_references]
+group_by_and_order_by_style = explicit

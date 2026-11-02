@@ -1,0 +1,141 @@
+version: 2
+
+models:
+  - name: stg_transactions
+    description: >
+      Cleaned card transactions, one row per transaction. Casts types, strips the synthetic
+      `fraud_` prefix from merchant names, adds surrogate keys (the source has no IDs),
+      calendar attributes (via dbt_date), a night flag and an amount bucket (via the
+      `amount_bucket` macro). All marts read from this model.
+    data_tests:
+      - dbt_expectations.expect_table_row_count_to_equal_other_table:
+          arguments:
+            compare_model: source('raw', 'transactions')
+    columns:
+      - name: transaction_id
+        description: Surrogate key, MD5 of time, merchant, category, amount, customer name and address.
+        data_tests:
+          - not_null
+          - unique
+      - name: customer_id
+        description: >
+          Surrogate customer key from first name, last name, street and ZIP.
+          Name alone is not unique: 956 name pairs vs 965 customers.
+        data_tests:
+          - not_null
+      - name: transaction_at
+        description: Transaction timestamp.
+        data_tests:
+          - not_null
+      - name: transaction_date
+        description: Calendar date of the transaction.
+      - name: hour_of_day
+        description: Hour of the transaction, 0-23.
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 23
+      - name: day_of_week
+        description: ISO day of week, 1 = Monday ... 7 = Sunday (dbt_date.day_of_week).
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 1
+                max_value: 7
+      - name: day_name
+        description: Full weekday name (dbt_date.day_name).
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+      - name: is_night
+        description: 1 if the hour falls in the night window [night_start_hour, night_end_hour), default 22:00-04:00.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: merchant_name
+        description: Merchant name without the synthetic `fraud_` prefix.
+        data_tests:
+          - not_null
+      - name: category
+        description: Merchant category.
+        data_tests:
+          - not_null
+          - dbt_expectations.expect_column_distinct_count_to_equal:
+              arguments:
+                value: 14
+      - name: amount
+        description: Transaction amount, USD.
+        data_tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                strictly: true
+      - name: amount_bucket
+        description: >
+          Amount segment from the `amount_bucket` macro. Defaults: micro < $10, small < $50,
+          medium < $200, large < $1000, very_large >= $1000.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["micro", "small", "medium", "large", "very_large"]
+      - name: is_large_amount
+        description: 1 if amount >= large_amount_threshold ($200 by default, i.e. buckets large and very_large).
+      - name: first_name
+        description: Cardholder first name.
+      - name: last_name
+        description: Cardholder last name.
+      - name: gender
+        description: Cardholder gender.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["M", "F"]
+      - name: street
+        description: Cardholder street address.
+      - name: city
+        description: Cardholder city.
+      - name: state_code
+        description: Cardholder state, validated against the `states` seed.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('states')
+                field: state_code
+      - name: post_code
+        description: Cardholder ZIP code.
+      - name: customer_lat
+        description: Cardholder latitude.
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: -90
+                max_value: 90
+      - name: customer_lon
+        description: Cardholder longitude.
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: -180
+                max_value: 180
+      - name: city_population
+        description: Population of the cardholder's city.
+      - name: job
+        description: Cardholder occupation.
+      - name: merchant_lat
+        description: Merchant latitude.
+      - name: merchant_lon
+        description: Merchant longitude.
+      - name: is_fraud
+        description: Fraud label from the source, 1 = fraudulent.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
