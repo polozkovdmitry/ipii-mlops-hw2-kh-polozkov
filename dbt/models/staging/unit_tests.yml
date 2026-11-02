@@ -1,0 +1,19 @@
+unit_tests:
+  - name: test_stg_transactions_cleaning_and_buckets
+    description: >
+      Merchant prefix is stripped, codes are upper-cased, amount_bucket and is_night
+      respect their boundaries (10 -> small, 200 -> large, 1000 -> very_large; 03:59 is night, 04:00 is not).
+    model: stg_transactions
+    given:
+      - input: source('raw', 'transactions')
+        rows:
+          - {transaction_time: "2019-06-03 23:15:00", merch: "fraud_Kirlin and Sons", cat_id: "travel", amount: 9.99, name_1: "Ann", name_2: "Lee", gender: "f", street: "1 Main St", post_code: "10001", us_state: "ca", target: 1}
+          - {transaction_time: "2019-06-04 12:00:00", merch: "fraud_Kirlin and Sons", cat_id: "travel", amount: 10, name_1: "Ann", name_2: "Lee", gender: "F", street: "1 Main St", post_code: "10001", us_state: "CA", target: 0}
+          - {transaction_time: "2019-06-08 04:00:00", merch: "Plain Shop", cat_id: "home", amount: 200, name_1: "Bob", name_2: "Ray", gender: "M", street: "2 Oak Ave", post_code: "20002", us_state: "NY", target: 0}
+          - {transaction_time: "2019-06-09 03:59:00", merch: "Plain Shop", cat_id: "home", amount: 1000, name_1: "Bob", name_2: "Ray", gender: "M", street: "2 Oak Ave", post_code: "20002", us_state: "NY", target: 1}
+    expect:
+      rows:
+        - {merchant_name: "Kirlin and Sons", state_code: "CA", gender: "F", amount_bucket: "micro", is_large_amount: 0, is_night: 1, hour_of_day: 23, day_of_week: 1, day_name: "Monday", is_fraud: 1}
+        - {merchant_name: "Kirlin and Sons", state_code: "CA", gender: "F", amount_bucket: "small", is_large_amount: 0, is_night: 0, hour_of_day: 12, day_of_week: 2, day_name: "Tuesday", is_fraud: 0}
+        - {merchant_name: "Plain Shop", state_code: "NY", gender: "M", amount_bucket: "large", is_large_amount: 1, is_night: 0, hour_of_day: 4, day_of_week: 6, day_name: "Saturday", is_fraud: 0}
+        - {merchant_name: "Plain Shop", state_code: "NY", gender: "M", amount_bucket: "very_large", is_large_amount: 1, is_night: 1, hour_of_day: 3, day_of_week: 7, day_name: "Sunday", is_fraud: 1}

@@ -1,0 +1,34 @@
+version: 2
+
+seeds:
+  - name: states
+    description: >
+      Reference list of US states (50 states + DC) with US Census Bureau region and division.
+      Used to enrich state-level marts with readable names and to validate state codes in staging.
+    config:
+      column_types:
+        state_code: LowCardinality(String)
+        state_name: String
+        region: LowCardinality(String)
+        division: LowCardinality(String)
+    columns:
+      - name: state_code
+        description: Two-letter USPS state code.
+        data_tests:
+          - not_null
+          - unique
+      - name: state_name
+        description: Full state name.
+        data_tests:
+          - not_null
+          - unique
+      - name: region
+        description: Census region.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["Northeast", "Midwest", "South", "West"]
+      - name: division
+        description: Census division (9 values).
+        data_tests:
+          - not_null

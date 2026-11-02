@@ -1,0 +1,57 @@
+name: fraud_analytics
+version: "1.0.0"
+config-version: 2
+require-dbt-version: [">=1.8.0", "<2.0.0"]
+
+profile: fraud_analytics
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+analysis-paths: ["analyses"]
+
+target-path: "target"
+clean-targets: ["target", "dbt_packages", "logs"]
+
+vars:
+  "dbt_date:time_zone": "UTC"
+
+  # amount_bucket: верхние границы бакетов в долларах (последний бакет открыт сверху)
+  amount_bucket_cutoffs: [10, 50, 200, 1000]
+  # "крупная" транзакция = бакеты large и very_large
+  large_amount_threshold: 200
+
+  # ночное окно [start, end) по часам, переходит через полночь
+  night_start_hour: 22
+  night_end_hour: 4
+
+  # mart_daily_state_metrics: сколько последних дней пересчитывать при инкрементальном запуске
+  incremental_lookback_days: 3
+
+  # mart_hourly_fraud_pattern: окно "повышенного риска", если fraud_rate >= k * общий
+  high_risk_window_lift: 2
+
+  # mart_merchant_analytics: z для нижней границы Уилсона (1.96 = 95%)
+  wilson_z: 1.96
+
+  # mart_customer_risk_profile: композитный скоринг 0-100
+  risk_weight_fraud: 0.5
+  risk_weight_amount: 0.3
+  risk_weight_night: 0.2
+  risk_fraud_rate_cap: 0.02 # fraud_rate >= 2% даёт полный балл по компоненте
+  risk_tier_high: 60
+  risk_tier_medium: 35
+
+models:
+  fraud_analytics:
+    staging:
+      +materialized: view
+      +schema: staging
+    marts:
+      +materialized: table
+      +schema: marts
+
+seeds:
+  fraud_analytics:
+    +schema: reference

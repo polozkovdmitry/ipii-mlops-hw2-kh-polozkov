@@ -1,0 +1,359 @@
+version: 2
+
+models:
+  - name: mart_daily_state_metrics
+    description: >
+      Daily transaction metrics per state. Incremental model: each run recomputes only the last
+      `incremental_lookback_days` days (default 3) and replaces them via ClickHouse `delete_insert`
+      on (transaction_date, state_code), so late-arriving transactions are picked up without a full rebuild.
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [transaction_date, state_code]
+    columns:
+      - name: transaction_date
+        description: Calendar date.
+        data_tests:
+          - not_null
+      - name: state_code
+        description: Cardholder state.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('states')
+                field: state_code
+      - name: txn_count
+        description: Number of transactions.
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 1
+      - name: total_amount
+        description: Sum of amounts, USD.
+      - name: avg_amount
+        description: Average check, USD.
+      - name: p95_amount
+        description: 95th percentile of amount, USD (ClickHouse `quantile(0.95)`, approximate).
+      - name: large_txn_count
+        description: Transactions with amount >= large_amount_threshold.
+      - name: large_txn_share_pct
+        description: Share of large transactions, %.
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 100
+      - name: fraud_count
+        description: Fraudulent transactions.
+      - name: fraud_rate_pct
+        description: Fraudulent share of transactions, %.
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 100
+      - name: updated_at
+        description: When this row was last (re)computed, shows which days the last incremental run touched.
+
+  - name: mart_fraud_by_category
+    description: >
+      Fraud by merchant category, ranked by fraud rate. `fraud_lift` shows how many times more
+      often fraud happens in the category than across all transactions.
+    columns:
+      - name: category
+        description: Merchant category.
+        data_tests:
+          - not_null
+          - unique
+      - name: txn_count
+        description: Number of transactions.
+      - name: fraud_count
+        description: Fraudulent transactions.
+      - name: fraud_rate_pct
+        description: Fraudulent share of transactions, %.
+        data_tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 100
+      - name: total_amount
+        description: Sum of all amounts, USD.
+      - name: fraud_amount
+        description: Sum of fraudulent amounts, USD.
+      - name: fraud_amount_share_pct
+        description: Fraudulent share of the category's money, %.
+      - name: avg_amount
+        description: Average check, USD.
+      - name: avg_fraud_amount
+        description: Average fraudulent transaction, USD (0 if there was no fraud).
+      - name: fraud_lift
+        description: Category fraud rate divided by the overall fraud rate.
+      - name: fraud_rate_rank
+        description: Rank by fraud rate, 1 = highest.
+
+  - name: mart_fraud_by_state
+    description: >
+      Geographic view of fraud by cardholder state, enriched with names and Census regions from
+      the `states` seed. Note that some states have very few customers (e.g. DE has one), so their
+      rates are noisy; `unique_customers` is there to judge that.
+    columns:
+      - name: state_code
+        description: Two-letter state code.
+        data_tests:
+          - not_null
+          - unique
+          - relationships:
+              arguments:
+                to: ref('states')
+                field: state_code
+      - name: state_name
+        description: Full state name from the seed.
+        data_tests:
+          - not_null
+      - name: region
+        description: Census region.
+      - name: division
+        description: Census division.
+      - name: txn_count
+        description: Number of transactions.
+      - name: fraud_count
+        description: Fraudulent transactions.
+      - name: fraud_rate_pct
+        description: Fraudulent share of transactions, %.
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 100
+      - name: unique_customers
+        description: Distinct customers.
+      - name: fraud_customers
+        description: Distinct customers with at least one fraudulent transaction.
+      - name: fraud_customer_share_pct
+        description: Share of the state's customers affected by fraud, %.
+      - name: unique_merchants
+        description: Distinct merchants used by the state's customers.
+      - name: total_amount
+        description: Sum of amounts, USD.
+      - name: fraud_amount
+        description: Sum of fraudulent amounts, USD.
+      - name: fraud_amount_share_pct
+        description: Fraudulent share of money, %.
+      - name: fraud_rate_rank
+        description: Rank by fraud rate, 1 = highest.
+
+  - name: mart_customer_risk_profile
+    description: |
+      One row per customer with transaction history and a composite risk score.
+
+      **risk_score (0-100)** = 100 × (w_fraud × fraud_component + w_amount × amount_component + w_night × night_component),
+      weights from vars `risk_weight_*` (default 0.5 / 0.3 / 0.2, must sum to 1):
+
+      - `fraud_component` = min(fraud_rate / risk_fraud_rate_cap, 1); a 2% fraud rate already gives the full component
+      - `amount_component` = mean of the customer's percentile ranks by average and by max amount
+      - `night_component` = the customer's percentile rank by share of night transactions (22:00-04:00)
+
+      **risk_tier**: HIGH if score >= `risk_tier_high` (60), MEDIUM if >= `risk_tier_medium` (35), else LOW.
+      With default weights a customer without fraud scores at most 50, so HIGH always means confirmed fraud
+      plus unusual behavior.
+    columns:
+      - name: customer_id
+        description: Surrogate customer key (see stg_transactions).
+        data_tests:
+          - not_null
+          - unique
+      - name: first_name
+        description: First name.
+      - name: last_name
+        description: Last name.
+      - name: gender
+        description: Gender.
+      - name: city
+        description: City.
+      - name: state_code
+        description: State.
+      - name: job
+        description: Occupation.
+      - name: first_txn_at
+        description: First transaction.
+      - name: last_txn_at
+        description: Last transaction.
+      - name: active_days
+        description: Days between first and last transaction, inclusive.
+      - name: txn_count
+        description: Number of transactions.
+      - name: fraud_count
+        description: Fraudulent transactions.
+      - name: fraud_rate_pct
+        description: Fraudulent share of the customer's transactions, %.
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 100
+      - name: last_fraud_at
+        description: Last fraudulent transaction, null if none.
+      - name: total_amount
+        description: Total spend, USD.
+      - name: avg_amount
+        description: Average check, USD.
+      - name: max_amount
+        description: Largest transaction, USD.
+      - name: main_category
+        description: Most frequent category.
+      - name: night_txn_share_pct
+        description: Share of transactions in the night window, %.
+      - name: fraud_component
+        description: Fraud part of the score, 0-1.
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 1
+      - name: amount_component
+        description: Amount part of the score, 0-1.
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 1
+      - name: night_component
+        description: Night part of the score, 0-1.
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 1
+      - name: risk_score
+        description: Composite risk score, 0-100.
+        data_tests:
+          - not_null
+      - name: risk_tier
+        description: HIGH / MEDIUM / LOW, from risk_score.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["HIGH", "MEDIUM", "LOW"]
+
+  - name: mart_hourly_fraud_pattern
+    description: >
+      Fraud by weekday × hour (7 × 24 = 168 slots). A slot is a high-risk window when its fraud rate is
+      at least `high_risk_window_lift` (default 2) times the overall rate. In this dataset all high-risk
+      windows fall between 22:00 and 04:00.
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [day_of_week, hour_of_day]
+      - dbt_expectations.expect_table_row_count_to_equal:
+          arguments:
+            value: 168
+    columns:
+      - name: day_of_week
+        description: ISO day of week, 1 = Monday.
+        data_tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 1
+                max_value: 7
+      - name: day_name
+        description: Weekday name.
+      - name: hour_of_day
+        description: Hour, 0-23.
+        data_tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 23
+      - name: is_night
+        description: 1 if the hour is in the night window.
+      - name: txn_count
+        description: Number of transactions in the slot.
+      - name: fraud_count
+        description: Fraudulent transactions in the slot.
+      - name: fraud_rate_pct
+        description: Fraudulent share, %.
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 100
+      - name: avg_amount
+        description: Average check, USD.
+      - name: fraud_amount
+        description: Sum of fraudulent amounts, USD.
+      - name: fraud_lift
+        description: Slot fraud rate divided by the overall fraud rate.
+      - name: is_high_risk_window
+        description: 1 if fraud_lift >= high_risk_window_lift.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: fraud_rate_rank
+        description: Rank by fraud rate, 1 = highest.
+
+  - name: mart_merchant_analytics
+    description: |
+      Per-merchant turnover and fraud metrics with a statistically grounded suspicious flag.
+
+      A merchant is **suspicious** when the lower bound of the 95% Wilson score interval of its fraud rate
+      is above the overall fraud rate, i.e. even a pessimistic estimate says the merchant is worse than
+      average. Unlike a plain "rate > k × average" rule, this does not flag small merchants whose high
+      rate is just noise (1 fraud out of 2 transactions), but does flag large merchants with a moderately
+      but consistently elevated rate. z is set by the `wilson_z` var.
+    data_tests:
+      - dbt_expectations.expect_column_pair_values_A_to_be_greater_than_B:
+          arguments:
+            column_A: fraud_rate_pct
+            column_B: fraud_rate_lower_bound_pct
+            or_equal: true
+    columns:
+      - name: merchant_name
+        description: Merchant name (without the `fraud_` prefix).
+        data_tests:
+          - not_null
+          - unique
+      - name: main_category
+        description: Most frequent category of the merchant.
+      - name: category_count
+        description: Number of distinct categories (1 for every merchant in this dataset).
+      - name: txn_count
+        description: Number of transactions.
+      - name: fraud_count
+        description: Fraudulent transactions.
+      - name: fraud_rate_pct
+        description: Fraudulent share of transactions, %.
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 100
+      - name: fraud_rate_lower_bound_pct
+        description: Lower bound of the Wilson score interval for the fraud rate, %.
+      - name: overall_fraud_rate_pct
+        description: Fraud rate across all transactions, %, the baseline for the flag.
+      - name: turnover
+        description: Sum of amounts, USD.
+      - name: fraud_amount
+        description: Sum of fraudulent amounts, USD.
+      - name: avg_amount
+        description: Average check, USD.
+      - name: unique_customers
+        description: Distinct customers.
+      - name: first_txn_at
+        description: First transaction.
+      - name: last_txn_at
+        description: Last transaction.
+      - name: is_suspicious
+        description: 1 if fraud_rate_lower_bound_pct > overall_fraud_rate_pct.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
