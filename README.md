@@ -1,6 +1,8 @@
 # ДЗ 2: CSV -> Kafka -> ClickHouse
 
 > ДЗ 4 (dbt) - в каталоге [`dbt/`](dbt/README.md).
+>
+> ДЗ 5 (мониторинг скоринга: Prometheus + Grafana) - в каталоге [`monitoring/`](monitoring/README.md).
 
 Задание:
 

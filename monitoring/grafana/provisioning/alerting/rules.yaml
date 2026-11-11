@@ -1,0 +1,119 @@
+# Правила алертов Grafana. Подхватываются при старте, видны в Alerting -> Alert rules,
+# папка "Fraud monitoring". Доставки уведомлений нет (contact point по умолчанию - пустой email),
+# состояние смотрится в самом разделе Alerting.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: fraud-scoring
+    folder: Fraud monitoring
+    interval: 10s
+    rules:
+      # 1. поток встал: симулятор/Kafka/скоринг не работают
+      - uid: stream-stopped
+        title: Поток транзакций остановился
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: sum(rate(scorer_transactions_total[30s]))
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: {type: lt, params: [0.5]}
+        # нет данных = fraud_detector не отдаёт метрики, это тоже остановка
+        noDataState: Alerting
+        execErrState: Error
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: fraud_detector обрабатывает меньше 0.5 транзакции в секунду
+          description: "Текущий TPS: {{ $values.B.Value | printf \"%.2f\" }}. Обычно около 10."
+
+      # 2. доля фрода среди последних 1000 транзакций выше порога
+      - uid: fraud-ratio-high
+        title: Доля фрода выше 5%
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: max(scorer_fraud_ratio)
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: {type: gt, params: [0.05]}
+        noDataState: OK
+        execErrState: Error
+        for: 20s
+        labels:
+          severity: warning
+        annotations:
+          summary: Модель помечает фродом слишком много транзакций
+          description: "Доля фрода среди последних 1000 транзакций: {{ $values.B.Value | humanizePercentage }}"
+
+      # 3. скоринг тормозит
+      - uid: scoring-slow
+        title: p95 времени обработки выше 100 мс
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 120, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: histogram_quantile(0.95, sum by (le) (rate(scorer_processing_seconds_bucket[1m])))
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: {type: gt, params: [0.1]}
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Скоринг одной транзакции стал заметно медленнее
+          description: "p95 времени обработки: {{ $values.B.Value | printf \"%.3f\" }} с"

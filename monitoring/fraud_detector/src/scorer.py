@@ -85,5 +85,5 @@ def make_pred(dt, source_info="kafka"):
         "score": y_proba,
         "fraud_flag": (y_proba > THRESHOLD) * 1,
     })
-    logger.info("Prediction complete for data from %s, model_version=%s", source_info, model_version)
+    logger.debug("Prediction complete for data from %s, model_version=%s", source_info, model_version)
     return submission, y_proba, model_version
