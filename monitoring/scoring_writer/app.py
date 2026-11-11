@@ -1,140 +1,132 @@
 import json
 import logging
 import os
+import time
 
 import psycopg2
 from confluent_kafka import Consumer
-from prometheus_client import Counter, Histogram, Summary, start_http_server
+from prometheus_client import Counter, Histogram, start_http_server
 
-# Настройка логгирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 METRICS_PORT = int(os.getenv("METRICS_PORT", "8001"))
-SCORE_BUCKETS = [i / 50.0 for i in range(51)]
+SCORE_BUCKETS = [i / 50 for i in range(51)]
+WRITE_BUCKETS = [0.0005, 0.001, 0.002, 0.003, 0.005, 0.0075, 0.01, 0.02, 0.05, 0.1, 0.5]
 
-DB_WRITE_TIME = Summary('scoring_db_write_seconds', 'Время записи скоринга в БД')
-SCORING_COUNT = Counter('scorings_total', 'Общее количество записанных скорингов')
-FRAUD_SCORE_HISTOGRAM = Histogram(
-    'scoring_fraud_score',
-    'Распределение записанных скоров мошенничества',
-    buckets=SCORE_BUCKETS,
-)
-FRAUD_COUNT = Counter(
-    'fraud_detected_total',
-    'Количество обнаруженных мошеннических транзакций',
-)
+WRITTEN = Counter('writer_scores_written_total', 'Скоры, записанные в PostgreSQL')
+FRAUD_WRITTEN = Counter('writer_fraud_flagged_total', 'Записанные транзакции с флагом фрода')
+ERRORS = Counter('writer_errors_total', 'Сообщения, которые не удалось записать')
+WRITE_TIME = Histogram('writer_db_write_seconds', 'Время INSERT + COMMIT одного скора', buckets=WRITE_BUCKETS)
+WRITTEN_SCORES = Histogram('writer_score', 'Распределение записанных скоров', buckets=SCORE_BUCKETS)
+
+REQUIRED_KEYS = ('transaction_id', 'score', 'fraud_flag')
 
 
-def get_db_config():
-    return {
+def connect_db():
+    config = {
         "host": os.getenv("POSTGRES_HOST"),
         "port": os.getenv("POSTGRES_PORT"),
         "database": os.getenv("POSTGRES_DB"),
         "user": os.getenv("POSTGRES_USER"),
         "password": os.getenv("POSTGRES_PASSWORD"),
     }
+    for attempt in range(30):
+        try:
+            return psycopg2.connect(**config)
+        except psycopg2.OperationalError as exc:
+            logger.info("Postgres ещё не готов (%s): %s", attempt + 1, exc)
+            time.sleep(2)
+    raise RuntimeError("Не удалось подключиться к Postgres")
 
 
 def create_table(conn):
+    # us_state, merch, cat_id, amount и target нужны только для срезов в Grafana
     with conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS scores (
-                id SERIAL PRIMARY KEY,
+                id BIGSERIAL PRIMARY KEY,
                 transaction_id TEXT NOT NULL,
-                score FLOAT NOT NULL,
-                fraud_flag INT NOT NULL,
+                score DOUBLE PRECISION NOT NULL,
+                fraud_flag SMALLINT NOT NULL,
                 model_version TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                us_state TEXT,
+                merch TEXT,
+                cat_id TEXT,
+                amount DOUBLE PRECISION,
+                target SMALLINT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             );
+            CREATE INDEX IF NOT EXISTS scores_created_at_idx ON scores (created_at);
         """)
-        cur.execute("""
-            ALTER TABLE scores ADD COLUMN IF NOT EXISTS model_version TEXT;
-        """)
-        conn.commit()
-        logger.info("Таблица 'scores' проверена или создана.")
+    conn.commit()
+    logger.info("Таблица scores готова")
 
 
-@DB_WRITE_TIME.time()
 def insert_score(conn, data):
+    started = time.perf_counter()
     with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO scores (transaction_id, score, fraud_flag, model_version)
-            VALUES (%s, %s, %s, %s);
-        """, (
-            data["transaction_id"],
-            data["score"],
-            data["fraud_flag"],
-            data.get("model_version"),
-        ))
-        conn.commit()
+        cur.execute(
+            """
+            INSERT INTO scores (transaction_id, score, fraud_flag, model_version,
+                                us_state, merch, cat_id, amount, target)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                data["transaction_id"], data["score"], data["fraud_flag"], data.get("model_version"),
+                data.get("us_state"), data.get("merch"), data.get("cat_id"), data.get("amount"),
+                data.get("target"),
+            ),
+        )
+    conn.commit()
+    WRITE_TIME.observe(time.perf_counter() - started)
 
-    SCORING_COUNT.inc()
-    FRAUD_SCORE_HISTOGRAM.observe(data["score"])
+    WRITTEN.inc()
+    WRITTEN_SCORES.observe(data["score"])
     if data["fraud_flag"] == 1:
-        FRAUD_COUNT.inc()
+        FRAUD_WRITTEN.inc()
 
 
 def run_consumer():
     start_http_server(METRICS_PORT)
-    logger.info("Prometheus метрики доступны на порту %s", METRICS_PORT)
+    logger.info("Метрики Prometheus на порту %s", METRICS_PORT)
 
-    kafka_bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS")
-    scoring_topic = os.getenv("KAFKA_SCORING_TOPIC")
-
-    consumer_config = {
-        'bootstrap.servers': kafka_bootstrap_servers,
+    consumer = Consumer({
+        'bootstrap.servers': os.getenv("KAFKA_BOOTSTRAP_SERVERS"),
         'group.id': 'scoring-writer',
         'auto.offset.reset': 'earliest',
-    }
+    })
+    consumer.subscribe([os.getenv("KAFKA_SCORING_TOPIC")])
 
-    logger.info(f"Подключение к Kafka: {kafka_bootstrap_servers}, топик: {scoring_topic}")
-    consumer = Consumer(consumer_config)
-    consumer.subscribe([scoring_topic])
-
-    db_config = get_db_config()
-    conn = psycopg2.connect(**db_config)
+    conn = connect_db()
     create_table(conn)
 
     try:
         while True:
             msg = consumer.poll(1.0)
             if msg is None:
-                logger.debug("Ожидание сообщений...")
                 continue
             if msg.error():
-                logger.error(f"Kafka error: {msg.error()}")
+                logger.error("Kafka error: %s", msg.error())
                 continue
-
             try:
-                value_str = msg.value().decode('utf-8')
-                logger.debug(f"Получено сообщение: {value_str}")
-                data_list = json.loads(value_str)
-
-                # Проверяем, что это список
-                if isinstance(data_list, list):
-                    for data in data_list:
-                        required_keys = ['transaction_id', 'score', 'fraud_flag']
-                        if not all(k in data for k in required_keys):
-                            logger.error(f"Некорректный формат элемента: {data}")
-                            continue
-                        insert_score(conn, data)
-                        logger.info(f"Записано в БД: {data['transaction_id']}")
-                else:
-                    logger.error(f"Ожидался список, получен: {type(data_list)}")
-
-            except json.JSONDecodeError as je:
-                logger.exception(f"Ошибка декодирования JSON: {je}")
-            except Exception as e:
-                logger.exception(f"Ошибка обработки сообщения: {e}")
-
-    except KeyboardInterrupt:
-        logger.info("Потребитель остановлен пользователем.")
+                items = json.loads(msg.value().decode('utf-8'))
+                if isinstance(items, dict):
+                    items = [items]
+                for data in items:
+                    if not all(k in data for k in REQUIRED_KEYS):
+                        ERRORS.inc()
+                        logger.error("Некорректное сообщение: %s", data)
+                        continue
+                    insert_score(conn, data)
+            except Exception:
+                ERRORS.inc()
+                conn.rollback()
+                logger.exception("Ошибка обработки сообщения")
     finally:
         consumer.close()
         conn.close()
 
 
 if __name__ == "__main__":
-    logger.info("Запуск потребителя и писателя в БД...")
     run_consumer()

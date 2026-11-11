@@ -1,22 +1,24 @@
+# Все переменные имеют значения по умолчанию, .env нужен только чтобы их переопределить
+# (например, путь к train.csv, если он лежит не в ../data).
+x-postgres-env: &postgres-env
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: ${POSTGRES_DB:-fraud_db}
+  POSTGRES_USER: ${POSTGRES_USER:-fraud_user}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fraud_pass}
+
 services:
-  # Zookeeper (обязательный для Kafka)
   zookeeper:
     image: confluentinc/cp-zookeeper:7.3.0
-    networks:
-      - ml-scorer
+    networks: [ml-scorer]
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
-    ports:
-      - "2181:2181"
 
-  # Сервис Kafka
   kafka:
     image: confluentinc/cp-kafka:7.3.0
-    depends_on:
-      - zookeeper
-    networks:
-      - ml-scorer
+    depends_on: [zookeeper]
+    networks: [ml-scorer]
     ports:
       - "9095:9095"
     environment:
@@ -26,65 +28,51 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"  # Отключаем автосоздание топиков
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
     healthcheck:
       test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9095", "--list"]
       interval: 5s
       timeout: 10s
       retries: 10
 
-  # Сервис для создания топиков при старте
   kafka-setup:
     image: confluentinc/cp-kafka:7.3.0
     depends_on:
       kafka:
-        condition: service_healthy  # Ждем пока Kafka станет здоровой
-    networks:
-      - ml-scorer
+        condition: service_healthy
+    networks: [ml-scorer]
     restart: on-failure
-    entrypoint: [ "/bin/bash", "-c" ]
+    entrypoint: ["/bin/bash", "-c"]
     command: |
       "
-      echo 'Ожидание готовности Kafka...'
-      while ! kafka-topics --bootstrap-server kafka:9092 --list; do
-        sleep 1
-      done
-
-      echo 'Создание топиков...'
       kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic transactions --partitions 3 --replication-factor 1 --config retention.ms=604800000
       kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic scoring --partitions 3 --replication-factor 1 --config retention.ms=604800000
-
-      echo 'Топики успешно созданы:'
       kafka-topics --bootstrap-server kafka:9092 --list
       "
 
-  # Сервис для удобного просмотра топиков и настройки kafka
   kafka-ui:
-    image: provectuslabs/kafka-ui:latest
-    depends_on:
-      - kafka
-    networks:
-      - ml-scorer
+    image: provectuslabs/kafka-ui:v0.7.2
+    depends_on: [kafka]
+    networks: [ml-scorer]
     ports:
-      - "8080:8080"
+      - "8082:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
-      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
 
   fraud_detector:
     build: ./fraud_detector
-    networks:
-      - ml-scorer
+    networks: [ml-scorer]
     environment:
-      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
-      KAFKA_TRANSACTIONS_TOPIC: "transactions"
-      KAFKA_SCORING_TOPIC: "scoring"
-      MODELS_DIR: "/models"
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TRANSACTIONS_TOPIC: transactions
+      KAFKA_SCORING_TOPIC: scoring
+      MODELS_DIR: /models
     volumes:
       - model_registry:/models
     ports:
-      - "8000:8000"
+      - "8000:8000"   # /metrics
+    restart: unless-stopped
     depends_on:
       kafka:
         condition: service_healthy
@@ -93,14 +81,11 @@ services:
 
   postgres:
     image: postgres:15
-    networks:
-      - ml-scorer
-    env_file:
-      - .env
+    networks: [ml-scorer]
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:-fraud_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fraud_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-fraud_db}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -113,15 +98,15 @@ services:
 
   transaction_simulator:
     build: ./transaction_simulator
-    networks:
-      - ml-scorer
+    networks: [ml-scorer]
     environment:
-      KAFKA_BROKERS: "kafka:9092"
-      KAFKA_TOPIC: "transactions"
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC: transactions
       TRANSACTIONS_CSV_PATH: /data/train.csv
-      SEND_INTERVAL_SECONDS: "0.1"
+      SEND_INTERVAL_SECONDS: ${SEND_INTERVAL_SECONDS:-0.1}
+      FRAUD_BOOST: ${FRAUD_BOOST:-0}
     volumes:
-      - ${TRAIN_DATA_CSV}:/data/train.csv:ro
+      - ${TRAIN_DATA_CSV:-../data/train.csv}:/data/train.csv:ro
     depends_on:
       kafka:
         condition: service_healthy
@@ -131,20 +116,14 @@ services:
 
   scoring_writer:
     build: ./scoring_writer
-    networks:
-      - ml-scorer
-    env_file:
-      - .env
+    networks: [ml-scorer]
     environment:
-      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS}
-      KAFKA_SCORING_TOPIC: ${KAFKA_SCORING_TOPIC}
-      POSTGRES_HOST: ${POSTGRES_HOST}
-      POSTGRES_PORT: ${POSTGRES_PORT}
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      <<: *postgres-env
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_SCORING_TOPIC: scoring
     ports:
-      - "8001:8001"
+      - "8001:8001"   # /metrics
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
@@ -155,20 +134,13 @@ services:
 
   data_loader:
     build: ./data_loader
-    networks:
-      - ml-scorer
-    env_file:
-      - .env
+    networks: [ml-scorer]
     environment:
-      POSTGRES_HOST: ${POSTGRES_HOST}
-      POSTGRES_PORT: ${POSTGRES_PORT}
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      <<: *postgres-env
       LABELED_CSV_PATH: /data/train.csv
       TRAINING_DATA_DIR: /training_data
     volumes:
-      - ${TRAIN_DATA_CSV}:/data/train.csv:ro
+      - ${TRAIN_DATA_CSV:-../data/train.csv}:/data/train.csv:ro
       - training_data:/training_data
     depends_on:
       postgres:
@@ -178,11 +150,9 @@ services:
   airflow:
     build: ./airflow
     user: "0:0"
-    networks:
-      - ml-scorer
-    env_file:
-      - .env
+    networks: [ml-scorer]
     environment:
+      <<: *postgres-env
       AIRFLOW__CORE__EXECUTOR: SequentialExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
@@ -192,11 +162,6 @@ services:
       PYTHONPATH: /opt/airflow
       _AIRFLOW_WWW_USER_USERNAME: admin
       _AIRFLOW_WWW_USER_PASSWORD: admin
-      POSTGRES_HOST: ${POSTGRES_HOST}
-      POSTGRES_PORT: ${POSTGRES_PORT}
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       TRAINING_DATA_DIR: /opt/airflow/training_data
       MODELS_DIR: /opt/airflow/models
       FRAUD_SRC: /opt/airflow/fraud_src
@@ -216,52 +181,52 @@ services:
         condition: service_completed_successfully
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.54.1
+    networks: [ml-scorer]
     ports:
       - "9090:9090"
     volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
-      - '--web.console.templates=/usr/share/prometheus/consoles'
-    networks:
-      - ml-scorer
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.3.0
+    networks: [ml-scorer]
     ports:
       - "3000:3000"
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning
-      - ./grafana/dashboards:/var/lib/grafana/dashboards
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_DASHBOARDS_MIN_REFRESH_INTERVAL=1s
+      <<: *postgres-env   # для datasource PostgreSQL в provisioning
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_MIN_REFRESH_INTERVAL: 1s
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/scorer.json
     depends_on:
       - prometheus
-    networks:
-      - ml-scorer
+      - postgres
 
   node-exporter:
-    image: prom/node-exporter:latest
+    image: prom/node-exporter:v1.8.2
+    networks: [ml-scorer]
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /:/rootfs:ro
     command:
-      - '--path.procfs=/host/proc'
-      - '--path.rootfs=/rootfs'
-      - '--path.sysfs=/host/sys'
-      - '--collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($$|/)'
+      - --path.procfs=/host/proc
+      - --path.rootfs=/rootfs
+      - --path.sysfs=/host/sys
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
     expose:
       - 9100
-    networks:
-      - ml-scorer
 
 networks:
   ml-scorer:

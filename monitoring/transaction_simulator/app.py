@@ -23,6 +23,9 @@ CSV_PATH = Path(os.getenv("TRANSACTIONS_CSV_PATH", "/data/train.csv"))
 KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "kafka:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "transactions")
 SEND_INTERVAL_SECONDS = float(os.getenv("SEND_INTERVAL_SECONDS", "0.1"))
+# доля сообщений, которые берутся только из фродовых строк (target=1). 0 - обычный поток,
+# больше 0 - "атака", нужна чтобы проверить алерт на долю фрода
+FRAUD_BOOST = float(os.getenv("FRAUD_BOOST", "0"))
 TIME_FORMAT = "%Y-%m-%d %H:%M"
 
 
@@ -75,10 +78,13 @@ def connect_producer() -> KafkaProducer:
 
 def stream_transactions(frame: pd.DataFrame, producer: KafkaProducer) -> None:
     """Без остановки шлёт случайные строки в Kafka с паузой SEND_INTERVAL_SECONDS."""
-    row_count = len(frame)
+    fraud_rows = frame[frame["target"] == 1] if "target" in frame.columns else frame.iloc[0:0]
+    if FRAUD_BOOST > 0:
+        logger.info("FRAUD_BOOST=%s: часть потока берётся из %s фродовых строк", FRAUD_BOOST, len(fraud_rows))
     sent = 0
     while True:
-        row = frame.iloc[random.randrange(row_count)]
+        source = fraud_rows if len(fraud_rows) and random.random() < FRAUD_BOOST else frame
+        row = source.iloc[random.randrange(len(source))]
         message = build_message(row)
         producer.send(KAFKA_TOPIC, value=message)
         producer.flush()
